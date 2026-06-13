@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Security Camera Viewer</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0d1117;
+        --panel: #151b23;
+        --panel-2: #1f2630;
+        --text: #eef3f8;
+        --muted: #93a4b7;
+        --accent: #5dd6c7;
+        --danger: #ff6b6b;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+      }
+
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 16px 20px;
+        background: rgba(13, 17, 23, 0.92);
+        border-bottom: 1px solid #27313e;
+        backdrop-filter: blur(10px);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 650;
+      }
+
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--accent);
+        box-shadow: 0 0 18px rgba(93, 214, 199, 0.75);
+      }
+
+      main {
+        width: min(1480px, 100%);
+        margin: 0 auto;
+        padding: 20px;
+      }
+
+      .segments {
+        display: grid;
+        gap: 18px;
+      }
+
+      .segment {
+        padding: 14px;
+        background: var(--panel);
+        border: 1px solid #27313e;
+        border-radius: 8px;
+      }
+
+      .segment-title {
+        margin: 0 0 12px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .frames {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+        gap: 12px;
+      }
+
+      img {
+        display: block;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        object-fit: cover;
+        background: var(--panel-2);
+        border: 1px solid #2a3442;
+        border-radius: 6px;
+      }
+
+      .empty,
+      .error {
+        min-height: 220px;
+        display: grid;
+        place-items: center;
+        padding: 28px;
+        color: var(--muted);
+        background: var(--panel);
+        border: 1px solid #27313e;
+        border-radius: 8px;
+        text-align: center;
+      }
+
+      .error {
+        color: var(--danger);
+      }
+
+      @media (max-width: 640px) {
+        header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        main {
+          padding: 12px;
+        }
+
+        .frames {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Security Camera Viewer</h1>
+      <div class="status">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="statusText">Connecting</span>
+      </div>
+    </header>
+
+    <main>
+      <section id="segments" class="segments">
+        <div class="empty">Waiting for frames</div>
+      </section>
+    </main>
+
+    <script>
+      const segmentsEl = document.querySelector("#segments");
+      const statusText = document.querySelector("#statusText");
+
+      function setStatus(text, failed = false) {
+        statusText.textContent = text;
+        statusText.style.color = failed ? "var(--danger)" : "var(--muted)";
+      }
+
+      function renderSegments(segments) {
+        segmentsEl.textContent = "";
+
+        if (!segments.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "No frames received yet";
+          segmentsEl.appendChild(empty);
+          return;
+        }
+
+        for (const segment of segments) {
+          const article = document.createElement("article");
+          article.className = "segment";
+
+          const title = document.createElement("h2");
+          title.className = "segment-title";
+          title.textContent = segment.timestamp;
+          article.appendChild(title);
+
+          const frames = document.createElement("div");
+          frames.className = "frames";
+
+          for (const frame of segment.frames) {
+            const img = document.createElement("img");
+            img.alt = `Camera frame from ${segment.timestamp}`;
+            img.decoding = "async";
+            img.loading = "lazy";
+            img.src = `data:image/jpeg;base64,${frame}`;
+            frames.appendChild(img);
+          }
+
+          article.appendChild(frames);
+          segmentsEl.appendChild(article);
+        }
+      }
+
+      function renderError(message) {
+        segmentsEl.textContent = "";
+        const error = document.createElement("div");
+        error.className = "error";
+        error.textContent = message;
+        segmentsEl.appendChild(error);
+      }
+
+      async function markViewing() {
+        const response = await fetch("/viewing", { method: "POST" });
+        if (!response.ok) {
+          throw new Error(`Viewing update failed with ${response.status}`);
+        }
+      }
+
+      async function refreshFrames() {
+        try {
+          setStatus("Refreshing");
+          const response = await fetch("/frames");
+          if (!response.ok) {
+            throw new Error(`Frame request failed with ${response.status}`);
+          }
+          const payload = await response.json();
+          renderSegments(payload.segments || []);
+          setStatus(`Live - ${new Date().toLocaleTimeString()}`);
+        } catch (error) {
+          setStatus("Error", true);
+          renderError(error.message || "Could not load frames");
+        }
+      }
+
+      async function boot() {
+        try {
+          await markViewing();
+        } catch (error) {
+          setStatus("Status update failed", true);
+        }
+
+        await refreshFrames();
+        setInterval(refreshFrames, 6000);
+      }
+
+      boot();
+    </script>
+  </body>
+</html>
