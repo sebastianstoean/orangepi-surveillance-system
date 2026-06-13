@@ -220,6 +220,10 @@ Configure `.env`:
 CAMERA_IP=192.168.1.50
 CAMERA_USER=your-camera-account-user
 CAMERA_PASSWORD=your-camera-account-password
+TAPO_API_USER=
+TAPO_API_PASSWORD=
+RTSP_USER=
+RTSP_PASSWORD=
 ENCRYPT_KEY=same-32-byte-hex-key-as-viewer
 INGEST_API_URL=https://ingest-service-url/upload
 STATUS_API_URL=https://status-service-url/status
@@ -238,6 +242,23 @@ is `visualizando`, it captures RTSP frames from the Tapo camera, encrypts each
 JPEG, batches frames into 5-second segments, and uploads to the ingest API.
 During active viewing it checks status once per second and stops uploading when
 the status returns to `idle`.
+
+`CAMERA_USER` and `CAMERA_PASSWORD` are used by default for both the Tapo local
+API and RTSP. Some camera models or firmware versions require the Tapo API login
+to use `admin` as the user and the TP-Link cloud account password. In that case,
+keep `CAMERA_USER`/`CAMERA_PASSWORD` as the camera account used for RTSP and set:
+
+```dotenv
+TAPO_API_USER=admin
+TAPO_API_PASSWORD=your-tplink-cloud-password
+```
+
+If your RTSP credentials differ from the camera account fields, set:
+
+```dotenv
+RTSP_USER=your-rtsp-user
+RTSP_PASSWORD=your-rtsp-password
+```
 
 ## Payload Shape
 

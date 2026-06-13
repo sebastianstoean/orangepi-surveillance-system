@@ -33,6 +33,10 @@ class Config:
     camera_ip: str
     camera_user: str
     camera_password: str
+    tapo_api_user: str
+    tapo_api_password: str
+    rtsp_user: str
+    rtsp_password: str
     encrypt_key: bytes
     ingest_api_url: str
     status_api_url: str
@@ -62,6 +66,13 @@ def load_config() -> Config:
         camera_ip=required_env("CAMERA_IP"),
         camera_user=required_env("CAMERA_USER"),
         camera_password=required_env("CAMERA_PASSWORD"),
+        tapo_api_user=os.getenv("TAPO_API_USER", required_env("CAMERA_USER")),
+        tapo_api_password=os.getenv(
+            "TAPO_API_PASSWORD",
+            required_env("CAMERA_PASSWORD"),
+        ),
+        rtsp_user=os.getenv("RTSP_USER", required_env("CAMERA_USER")),
+        rtsp_password=os.getenv("RTSP_PASSWORD", required_env("CAMERA_PASSWORD")),
         encrypt_key=encrypt_key,
         ingest_api_url=required_env("INGEST_API_URL"),
         status_api_url=required_env("STATUS_API_URL"),
@@ -87,14 +98,18 @@ class TapoFrameSource:
         self.capture: cv2.VideoCapture | None = None
 
         logging.info("Connecting to Tapo camera at %s", config.camera_ip)
-        self.tapo = Tapo(config.camera_ip, config.camera_user, config.camera_password)
+        self.tapo = Tapo(
+            config.camera_ip,
+            config.tapo_api_user,
+            config.tapo_api_password,
+        )
         logging.info("Tapo camera session established")
         self.open()
 
     @property
     def rtsp_url(self) -> str:
-        user = quote(self.config.camera_user, safe="")
-        password = quote(self.config.camera_password, safe="")
+        user = quote(self.config.rtsp_user, safe="")
+        password = quote(self.config.rtsp_password, safe="")
         return f"rtsp://{user}:{password}@{self.config.camera_ip}:554/stream1"
 
     def open(self) -> None:
