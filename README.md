@@ -222,6 +222,7 @@ CAMERA_USER=your-camera-account-user
 CAMERA_PASSWORD=your-camera-account-password
 TAPO_API_USER=
 TAPO_API_PASSWORD=
+REQUIRE_TAPO_API=false
 RTSP_USER=
 RTSP_PASSWORD=
 ENCRYPT_KEY=same-32-byte-hex-key-as-viewer
@@ -252,6 +253,10 @@ keep `CAMERA_USER`/`CAMERA_PASSWORD` as the camera account used for RTSP and set
 TAPO_API_USER=admin
 TAPO_API_PASSWORD=your-tplink-cloud-password
 ```
+
+By default, a Tapo API authentication failure is logged as a warning and the
+client continues with RTSP-only frame capture. Set `REQUIRE_TAPO_API=true` if
+you want the client to stop when the Tapo API login fails.
 
 If your RTSP credentials differ from the camera account fields, set:
 

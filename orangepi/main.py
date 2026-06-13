@@ -35,6 +35,7 @@ class Config:
     camera_password: str
     tapo_api_user: str
     tapo_api_password: str
+    require_tapo_api: bool
     rtsp_user: str
     rtsp_password: str
     encrypt_key: bytes
@@ -51,6 +52,17 @@ def required_env(name: str) -> str:
     return value
 
 
+def optional_env(name: str, default: str) -> str:
+    return os.getenv(name) or default
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
 def load_config() -> Config:
     load_dotenv()
 
@@ -62,17 +74,18 @@ def load_config() -> Config:
     if len(encrypt_key) != 32:
         raise RuntimeError("ENCRYPT_KEY must decode to exactly 32 bytes")
 
+    camera_user = required_env("CAMERA_USER")
+    camera_password = required_env("CAMERA_PASSWORD")
+
     return Config(
         camera_ip=required_env("CAMERA_IP"),
-        camera_user=required_env("CAMERA_USER"),
-        camera_password=required_env("CAMERA_PASSWORD"),
-        tapo_api_user=os.getenv("TAPO_API_USER", required_env("CAMERA_USER")),
-        tapo_api_password=os.getenv(
-            "TAPO_API_PASSWORD",
-            required_env("CAMERA_PASSWORD"),
-        ),
-        rtsp_user=os.getenv("RTSP_USER", required_env("CAMERA_USER")),
-        rtsp_password=os.getenv("RTSP_PASSWORD", required_env("CAMERA_PASSWORD")),
+        camera_user=camera_user,
+        camera_password=camera_password,
+        tapo_api_user=optional_env("TAPO_API_USER", camera_user),
+        tapo_api_password=optional_env("TAPO_API_PASSWORD", camera_password),
+        require_tapo_api=env_flag("REQUIRE_TAPO_API", default=False),
+        rtsp_user=optional_env("RTSP_USER", camera_user),
+        rtsp_password=optional_env("RTSP_PASSWORD", camera_password),
         encrypt_key=encrypt_key,
         ingest_api_url=required_env("INGEST_API_URL"),
         status_api_url=required_env("STATUS_API_URL"),
@@ -96,14 +109,24 @@ class TapoFrameSource:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.capture: cv2.VideoCapture | None = None
+        self.tapo: Tapo | None = None
 
         logging.info("Connecting to Tapo camera at %s", config.camera_ip)
-        self.tapo = Tapo(
-            config.camera_ip,
-            config.tapo_api_user,
-            config.tapo_api_password,
-        )
-        logging.info("Tapo camera session established")
+        try:
+            self.tapo = Tapo(
+                config.camera_ip,
+                config.tapo_api_user,
+                config.tapo_api_password,
+            )
+            logging.info("Tapo camera session established")
+        except Exception as exc:
+            if config.require_tapo_api:
+                raise
+            logging.warning(
+                "Tapo API authentication failed; continuing with RTSP-only "
+                "capture. Set REQUIRE_TAPO_API=true to make this fatal. Error: %s",
+                exc,
+            )
         self.open()
 
     @property
