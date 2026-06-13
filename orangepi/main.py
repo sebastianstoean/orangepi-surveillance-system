@@ -4,19 +4,18 @@ import base64
 import logging
 import os
 import signal
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
-import cv2
 import requests
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 from Crypto.Util.Padding import pad
 from dotenv import load_dotenv
-from pytapo import Tapo
 
 
 STATUS_IDLE = "idle"
@@ -31,13 +30,8 @@ MAX_UPLOAD_RETRIES = 3
 @dataclass(frozen=True)
 class Config:
     camera_ip: str
-    camera_user: str
-    camera_password: str
-    tapo_api_user: str
-    tapo_api_password: str
-    require_tapo_api: bool
-    rtsp_user: str
-    rtsp_password: str
+    rtsp_url: str
+    ffmpeg_bin: str
     encrypt_key: bytes
     ingest_api_url: str
     status_api_url: str
@@ -56,11 +50,10 @@ def optional_env(name: str, default: str) -> str:
     return os.getenv(name) or default
 
 
-def env_flag(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None or value == "":
-        return default
-    return value.lower() in {"1", "true", "yes", "on"}
+def build_rtsp_url(camera_ip: str, user: str, password: str) -> str:
+    escaped_user = quote(user, safe="")
+    escaped_password = quote(password, safe="")
+    return f"rtsp://{escaped_user}:{escaped_password}@{camera_ip}:554/stream1"
 
 
 def load_config() -> Config:
@@ -76,16 +69,17 @@ def load_config() -> Config:
 
     camera_user = required_env("CAMERA_USER")
     camera_password = required_env("CAMERA_PASSWORD")
+    camera_ip = required_env("CAMERA_IP")
+    rtsp_user = optional_env("RTSP_USER", camera_user)
+    rtsp_password = optional_env("RTSP_PASSWORD", camera_password)
 
     return Config(
-        camera_ip=required_env("CAMERA_IP"),
-        camera_user=camera_user,
-        camera_password=camera_password,
-        tapo_api_user=optional_env("TAPO_API_USER", camera_user),
-        tapo_api_password=optional_env("TAPO_API_PASSWORD", camera_password),
-        require_tapo_api=env_flag("REQUIRE_TAPO_API", default=False),
-        rtsp_user=optional_env("RTSP_USER", camera_user),
-        rtsp_password=optional_env("RTSP_PASSWORD", camera_password),
+        camera_ip=camera_ip,
+        rtsp_url=optional_env(
+            "RTSP_URL",
+            build_rtsp_url(camera_ip, rtsp_user, rtsp_password),
+        ),
+        ffmpeg_bin=os.getenv("FFMPEG_BIN", "ffmpeg"),
         encrypt_key=encrypt_key,
         ingest_api_url=required_env("INGEST_API_URL"),
         status_api_url=required_env("STATUS_API_URL"),
@@ -105,68 +99,53 @@ def encrypt_jpeg(jpeg_bytes: bytes, key: bytes) -> str:
     return base64.b64encode(iv + ciphertext).decode("ascii")
 
 
-class TapoFrameSource:
+class FfmpegFrameSource:
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.capture: cv2.VideoCapture | None = None
-        self.tapo: Tapo | None = None
-
-        logging.info("Connecting to Tapo camera at %s", config.camera_ip)
-        try:
-            self.tapo = Tapo(
-                config.camera_ip,
-                config.tapo_api_user,
-                config.tapo_api_password,
-            )
-            logging.info("Tapo camera session established")
-        except Exception as exc:
-            if config.require_tapo_api:
-                raise
-            logging.warning(
-                "Tapo API authentication failed; continuing with RTSP-only "
-                "capture. Set REQUIRE_TAPO_API=true to make this fatal. Error: %s",
-                exc,
-            )
-        self.open()
-
-    @property
-    def rtsp_url(self) -> str:
-        user = quote(self.config.rtsp_user, safe="")
-        password = quote(self.config.rtsp_password, safe="")
-        return f"rtsp://{user}:{password}@{self.config.camera_ip}:554/stream1"
-
-    def open(self) -> None:
-        self.close()
-        logging.info("Opening RTSP stream")
-        self.capture = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
-        if not self.capture.isOpened():
-            self.capture.release()
-            self.capture = None
-            raise RuntimeError("Could not open camera RTSP stream")
+        logging.info("Using RTSP stream from camera at %s", config.camera_ip)
 
     def close(self) -> None:
-        if self.capture is not None:
-            self.capture.release()
-            self.capture = None
+        return
 
     def capture_jpeg(self) -> bytes:
-        if self.capture is None or not self.capture.isOpened():
-            self.open()
+        command = [
+            self.config.ffmpeg_bin,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-rtsp_transport",
+            "tcp",
+            "-i",
+            self.config.rtsp_url,
+            "-frames:v",
+            "1",
+            "-an",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
+            "pipe:1",
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                timeout=15,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"FFmpeg binary not found: {self.config.ffmpeg_bin}"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("Timed out while reading frame from RTSP stream") from exc
 
-        assert self.capture is not None
-        ok, frame = self.capture.read()
-        if not ok or frame is None:
-            logging.warning("Frame read failed; reopening RTSP stream")
-            self.open()
-            assert self.capture is not None
-            ok, frame = self.capture.read()
-            if not ok or frame is None:
-                raise RuntimeError("Could not read frame from camera")
+        if result.returncode != 0 or not result.stdout:
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"Could not capture RTSP frame with FFmpeg: {stderr}")
 
-        encoded_ok, encoded = cv2.imencode(".jpg", frame)
-        if not encoded_ok:
-            raise RuntimeError("Could not encode camera frame as JPEG")
-        return encoded.tobytes()
+        return result.stdout
 
 
 class SurveillanceClient:
@@ -196,7 +175,7 @@ class SurveillanceClient:
             time.sleep(1)
         return True
 
-    def collect_segment(self, source: TapoFrameSource) -> dict[str, Any] | None:
+    def collect_segment(self, source: FfmpegFrameSource) -> dict[str, Any] | None:
         started_at = utc_now_iso()
         frames: list[str] = []
         deadline = time.monotonic() + SEGMENT_DURATION_SECONDS
@@ -254,7 +233,7 @@ class SurveillanceClient:
                 time.sleep(delay)
 
     def run(self) -> None:
-        source = TapoFrameSource(self.config)
+        source = FfmpegFrameSource(self.config)
         try:
             while not self.stop_requested:
                 try:
