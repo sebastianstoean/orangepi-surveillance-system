@@ -152,6 +152,56 @@ The service account needs read access to `SEGMENTS_BUCKET`. Configure mTLS at
 the HTTPS Load Balancer layer, or use the included nginx config in an environment
 where the container can terminate TLS directly.
 
+## Single VM Latest-Only Storage
+
+When `ingest` and `viewer` run on the same VM, you can avoid Cloud Storage for
+camera segments. Set `SEGMENTS_FILE` in both containers and mount the same Docker
+volume at `/data`.
+
+In this mode:
+
+- `ingest` writes every upload to the same file, for example `/data/latest.json`.
+- The next 5-second segment atomically replaces the previous one.
+- `viewer` reads only that latest file.
+- No historical segment objects are created.
+- `SEGMENTS_BUCKET` is not required for `ingest` or `viewer`.
+
+Create a shared volume:
+
+```bash
+docker volume create surveillance-segments
+```
+
+Run ingest:
+
+```bash
+docker run -d --restart unless-stopped \
+  --name surveillance-ingest \
+  --network surveillance \
+  -p 8081:8080 \
+  -e INGEST_API_KEY='shared-ingest-secret' \
+  -e SEGMENTS_FILE=/data/latest.json \
+  -v surveillance-segments:/data \
+  surveillance-ingest
+```
+
+Run viewer:
+
+```bash
+docker run -d --restart unless-stopped \
+  --name surveillance-viewer \
+  --network surveillance \
+  -p 443:8443 \
+  -e PORT=8443 \
+  -e USE_NGINX_MTLS=true \
+  -e ENCRYPT_KEY='same-32-byte-hex-key-as-orangepi' \
+  -e STATUS_SERVICE_URL='http://surveillance-status:8080' \
+  -e SEGMENTS_FILE=/data/latest.json \
+  -v surveillance-segments:/data:ro \
+  -v /etc/surveillance/certs:/etc/nginx/certs:ro \
+  surveillance-viewer
+```
+
 ## Orange Pi Client
 
 Install Python dependencies:

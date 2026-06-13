@@ -23,7 +23,6 @@ REQUEST_TIMEOUT_SECONDS = 10
 
 app = FastAPI(title="Surveillance Viewer")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-storage_client = storage.Client()
 http = requests.Session()
 
 
@@ -72,6 +71,51 @@ def status_viewing_url() -> str:
     return f"{raw_url}/status/viewing"
 
 
+def segments_file_path() -> str | None:
+    return os.getenv("SEGMENTS_FILE")
+
+
+def decrypted_segment_from_payload(
+    payload: dict[str, Any],
+    key: bytes,
+) -> dict[str, Any]:
+    timestamp = str(payload["timestamp"])
+    encrypted_frames = payload.get("frames", [])
+    decrypted_frames = [decrypt_frame(str(frame), key) for frame in encrypted_frames]
+    return {"timestamp": timestamp, "frames": decrypted_frames}
+
+
+def read_latest_local_segment(file_path: str, key: bytes) -> list[dict[str, Any]]:
+    path = Path(file_path)
+    if not path.exists():
+        return []
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return [decrypted_segment_from_payload(payload, key)]
+
+
+def read_gcs_segments(limit: int, key: bytes) -> list[dict[str, Any]]:
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(required_env("SEGMENTS_BUCKET"))
+    blobs = list(bucket.list_blobs(prefix="segments/"))
+    latest_blobs = sorted(blobs, key=lambda blob: segment_sort_key(blob.name), reverse=True)[
+        :limit
+    ]
+
+    segments: list[dict[str, Any]] = []
+    for blob in latest_blobs:
+        try:
+            payload = json.loads(blob.download_as_text())
+            segments.append(decrypted_segment_from_payload(payload, key))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to read or decrypt segment {blob.name}: {exc}",
+            ) from exc
+
+    return segments
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
@@ -91,30 +135,18 @@ def frames(
     )
 ) -> dict[str, list[dict[str, Any]]]:
     key = encryption_key()
-    bucket = storage_client.bucket(required_env("SEGMENTS_BUCKET"))
-    blobs = list(bucket.list_blobs(prefix="segments/"))
-    latest_blobs = sorted(blobs, key=lambda blob: segment_sort_key(blob.name), reverse=True)[
-        :limit
-    ]
 
-    segments: list[dict[str, Any]] = []
-    for blob in latest_blobs:
+    local_file = segments_file_path()
+    if local_file:
         try:
-            payload = json.loads(blob.download_as_text())
-            timestamp = str(payload["timestamp"])
-            encrypted_frames = payload.get("frames", [])
-            decrypted_frames = [
-                decrypt_frame(str(frame), key) for frame in encrypted_frames
-            ]
+            return {"segments": read_latest_local_segment(local_file, key)}
         except Exception as exc:
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to read or decrypt segment {blob.name}: {exc}",
+                detail=f"Failed to read or decrypt latest segment: {exc}",
             ) from exc
 
-        segments.append({"timestamp": timestamp, "frames": decrypted_frames})
-
-    return {"segments": segments}
+    return {"segments": read_gcs_segments(limit, key)}
 
 
 @app.post("/viewing")

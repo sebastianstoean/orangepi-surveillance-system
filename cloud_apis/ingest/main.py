@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -10,7 +11,6 @@ from pydantic import BaseModel, Field, field_validator
 
 
 app = FastAPI(title="Surveillance Ingest API")
-storage_client = storage.Client()
 
 
 class SegmentUpload(BaseModel):
@@ -48,6 +48,28 @@ def normalized_object_name(timestamp: str) -> str:
     return f"segments/{normalized}.json"
 
 
+def segments_file_path() -> str | None:
+    return os.getenv("SEGMENTS_FILE")
+
+
+def write_latest_local_segment(payload: SegmentUpload, file_path: str) -> None:
+    destination = Path(file_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    temporary.write_text(payload.model_dump_json(), encoding="utf-8")
+    temporary.replace(destination)
+
+
+def write_gcs_segment(payload: SegmentUpload) -> None:
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(required_env("SEGMENTS_BUCKET"))
+    blob = bucket.blob(normalized_object_name(payload.timestamp))
+    blob.upload_from_string(
+        payload.model_dump_json(),
+        content_type="application/json",
+    )
+
+
 @app.get("/healthz")
 def healthz() -> dict[str, bool]:
     return {"ok": True}
@@ -65,10 +87,10 @@ def upload_segment(
             detail="Invalid API key",
         )
 
-    bucket = storage_client.bucket(required_env("SEGMENTS_BUCKET"))
-    blob = bucket.blob(normalized_object_name(payload.timestamp))
-    blob.upload_from_string(
-        payload.model_dump_json(),
-        content_type="application/json",
-    )
+    local_file = segments_file_path()
+    if local_file:
+        write_latest_local_segment(payload, local_file)
+    else:
+        write_gcs_segment(payload)
+
     return {"received": True}
